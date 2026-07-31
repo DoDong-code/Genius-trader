@@ -9,9 +9,12 @@
     "fund:sync": "node server/scripts/syncFunds.js",
     "fund:seed": "node server/scripts/seedFunds.js",
     "test": "node --test server/tests/*.test.js",
-    "build": "node scripts/build-check.js"
+    "build": "node scripts/build-static.js"
   },
   "engines": {
     "node": ">=24"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0"
   }
 }

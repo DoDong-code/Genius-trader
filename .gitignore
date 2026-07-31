@@ -1,6 +1,7 @@
 # Local dependencies and package-manager caches
 node_modules/
 .pnpm-store/
+dist/
 
 # Runtime fund data: keep local, never publish personal positions or caches
 server/data/portfolio.sqlite*
