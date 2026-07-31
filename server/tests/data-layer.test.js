@@ -9,13 +9,19 @@ process.env.FUND_DB_PATH = path.join(temporaryDirectory, 'test.sqlite');
 
 const { getDatabase, closeDatabase } = require('../database/db');
 const { estimateFund, estimatePortfolio, upsertPosition } = require('../services/estimateService');
+const {
+  calculateFundEstimate,
+  calculateAccountEstimate
+} = require('../services/estimateEngine');
 const { getHistory } = require('../services/navService');
 const { parseFundScript, parseFundProfile } = require('../services/fundService');
 const {
   parseEstimate,
   parseHistoryPayload,
+  parseTiantianHistory,
   parseHoldings,
-  stockSecId
+  stockSecId,
+  stockSecIds
 } = require('../services/marketService');
 const { createServer } = require('../index');
 
@@ -38,17 +44,34 @@ function seedDatabase() {
     cost: 9000,
     amount: 10000
   });
+  db.prepare(`
+    INSERT INTO fund_holdings (fund_code, stock_code, stock_name, weight, report_date)
+    VALUES (?, ?, ?, ?, ?)
+  `).run('019633', '600000', '测试股票', 0.4, '2026-06-30');
+
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+  const insertPrice = db.prepare(`
+    INSERT INTO stock_price (stock_code, date, price, change_percent, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+  `);
+  insertPrice.run('600000', today, 10, 0.05);
+  insertPrice.run('512480', today, 1, -0.01);
 }
 
 seedDatabase();
 
-test('creates the five requested SQLite tables', () => {
+test('creates the requested SQLite tables', () => {
   const tables = getDatabase().prepare(`
     SELECT name
     FROM sqlite_master
     WHERE type = 'table'
   `).all().map(row => row.name);
-  ['fund', 'fund_nav', 'fund_holdings', 'stock_price', 'portfolio']
+  [
+    'fund', 'fund_nav', 'fund_holdings', 'stock_price', 'portfolio',
+    'fund_estimate', 'data_sync_state'
+  ]
     .forEach(name => assert.ok(tables.includes(name), `${name} should exist`));
 });
 
@@ -111,6 +134,16 @@ test('parses realtime estimate, NAV history and public holdings responses', () =
   assert.equal(holdings[0].report_date, '2026-06-30');
   assert.equal(stockSecId('600000'), '1.600000');
   assert.equal(stockSecId('00522'), '116.00522');
+  assert.deepEqual(stockSecIds('NVDA'), ['105.NVDA', '106.NVDA', '107.NVDA']);
+});
+
+test('parses Tiantian Fund historical NAV fallback response', () => {
+  const parsed = parseTiantianHistory('var apidata={ content:"<table><tr><th>date</th></tr><tr><td>2026-07-30</td><td>2.6005</td><td>2.7005</td><td>-6.70%</td></tr></table>",records:1,pages:1,curpage:1};');
+  assert.equal(parsed.history.length, 1);
+  assert.equal(parsed.history[0].date, '2026-07-30');
+  assert.equal(parsed.history[0].nav, 2.6005);
+  assert.equal(parsed.history[0].accNav, 2.7005);
+  assert.equal(parsed.history[0].changePercent, -0.067);
 });
 
 test('returns chronological history and calculates estimates', () => {
@@ -123,6 +156,21 @@ test('returns chronological history and calculates estimates', () => {
   assert.equal(accountEstimate.total_asset, 10000);
   assert.equal(accountEstimate.today_estimate_profit, 1000);
   assert.equal(accountEstimate.cumulative_profit, 1000);
+});
+
+test('calculates self-derived fund and account estimates from holdings and sector quotes', async () => {
+  const fundEstimate = await calculateFundEstimate('019633', { amount: 10000 });
+  assert.equal(fundEstimate.estimate_change, 0.032);
+  assert.equal(fundEstimate.estimate_profit, 320);
+  assert.equal(fundEstimate.estimateChange, 3.2);
+  assert.equal(fundEstimate.confidence, 'high');
+  assert.equal(fundEstimate.quote_coverage, 1);
+
+  const accountEstimate = await calculateAccountEstimate('account2');
+  assert.equal(accountEstimate.total_amount, 10000);
+  assert.equal(accountEstimate.today_profit, 320);
+  assert.equal(accountEstimate.today_change, 0.032);
+  assert.equal(accountEstimate.todayChange, 3.2);
 });
 
 test('serves health, fund, history and portfolio estimate APIs', async () => {
@@ -142,6 +190,12 @@ test('serves health, fund, history and portfolio estimate APIs', async () => {
 
     const estimate = await fetch(`http://127.0.0.1:${port}/api/portfolio/account2/estimate`).then(response => response.json());
     assert.equal(estimate.today_estimate_profit, 1000);
+
+    const engineEstimate = await fetch(`http://127.0.0.1:${port}/api/fund/019633/estimate?amount=10000`).then(response => response.json());
+    assert.equal(engineEstimate.estimate_profit, 320);
+
+    const accountEngineEstimate = await fetch(`http://127.0.0.1:${port}/api/account/account2/estimate`).then(response => response.json());
+    assert.equal(accountEngineEstimate.today_profit, 320);
   } finally {
     await new Promise(resolve => server.close(resolve));
   }

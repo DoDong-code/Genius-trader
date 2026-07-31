@@ -206,6 +206,26 @@ function writeDailyCache(code, data) {
   }));
 }
 
+function freshSyncState(resourceKey, dataType) {
+  const state = getDatabase().prepare(`
+    SELECT expires_at FROM data_sync_state
+    WHERE resource_key = ? AND data_type = ?
+  `).get(resourceKey, dataType);
+  return Boolean(state && Date.parse(state.expires_at) > Date.now());
+}
+
+function markSyncState(resourceKey, dataType, ttlMilliseconds) {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ttlMilliseconds);
+  getDatabase().prepare(`
+    INSERT INTO data_sync_state (resource_key, data_type, last_synced_at, expires_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(resource_key, data_type) DO UPDATE SET
+      last_synced_at = excluded.last_synced_at,
+      expires_at = excluded.expires_at
+  `).run(resourceKey, dataType, now.toISOString(), expiresAt.toISOString());
+}
+
 async function collectFund(code, options = {}) {
   const fundCode = assertFundCode(code);
   if (!options.force) {
@@ -215,11 +235,12 @@ async function collectFund(code, options = {}) {
 
   const scriptUrl = `${EASTMONEY_FUND_URL}/pingzhongdata/${fundCode}.js?v=${Date.now()}`;
   const profileUrl = `${EASTMONEY_FUND_URL}/${fundCode}.html`;
+  const useStoredHoldings = !options.force && freshSyncState(fundCode, 'holdings');
   const [scriptResult, profileResult, historyResult, holdingsResult] = await Promise.allSettled([
     fetchText(scriptUrl),
     fetchText(profileUrl),
-    fetchHistory(fundCode),
-    fetchHoldings(fundCode)
+    fetchHistory(fundCode, { withMeta: true }),
+    useStoredHoldings ? Promise.resolve(getFundHoldings(fundCode)) : fetchHoldings(fundCode)
   ]);
   const profileSource = profileResult.status === 'fulfilled' ? profileResult.value : '';
   const profile = parseFundProfile(profileSource);
@@ -231,7 +252,10 @@ async function collectFund(code, options = {}) {
       parsed = null;
     }
   }
-  const apiHistory = historyResult.status === 'fulfilled' ? historyResult.value : [];
+  const historyFetch = historyResult.status === 'fulfilled'
+    ? historyResult.value
+    : { history: [], source: null };
+  const apiHistory = Array.isArray(historyFetch) ? historyFetch : historyFetch.history;
   const historyByDate = new Map((parsed?.history || []).map(item => [item.date, item]));
   apiHistory.forEach(item => historyByDate.set(item.date, item));
   const history = [...historyByDate.values()]
@@ -256,12 +280,12 @@ async function collectFund(code, options = {}) {
     company: profile.company,
     source: {
       detail: parsed ? 'pingzhongdata' : 'fund-page',
-      history: apiHistory.length ? 'lsjz' : 'pingzhongdata',
+      history: apiHistory.length ? (historyFetch.source || 'eastmoney-lsjz') : 'pingzhongdata',
       holdings: holdingsResult.status === 'fulfilled' ? 'fund-archives' : null
     }
   };
   writeDailyCache(fundCode, data);
-  return { ...data, fromCache: false };
+  return { ...data, fromCache: false, refreshedHoldings: !useStoredHoldings };
 }
 
 async function importFund(code, options = {}) {
@@ -314,13 +338,19 @@ async function importFund(code, options = {}) {
     }
   });
 
+  markSyncState(data.fundCode, 'history', 24 * 60 * 60 * 1000);
+  if (data.refreshedHoldings) {
+    markSyncState(data.fundCode, 'holdings', 90 * 24 * 60 * 60 * 1000);
+  }
+
   return {
     success: true,
     fund: data.fundName,
     fund_code: data.fundCode,
     records: data.history.length,
     inserted: data.history.filter(item => !existingDates.has(item.date)).length,
-    cached: data.fromCache
+    cached: data.fromCache,
+    history_source: data.source.history
   };
 }
 
@@ -342,10 +372,12 @@ async function getRealtimeFundEstimate(code) {
       fund_code: fundCode,
       nav_date: latest?.date || null,
       nav: latest?.nav ?? null,
-      estimate_nav: latest?.nav ?? null,
-      estimate_change: latest && previous?.nav ? latest.nav / previous.nav - 1 : null,
+      estimate_nav: null,
+      // A published NAV change belongs to the last completed trading day.  It is
+      // useful as reference data, but must never be presented as today's estimate.
+      estimate_change: null,
       estimate_time: null,
-      source: 'latest-nav-fallback'
+      source: 'estimate-unavailable'
     };
   }
 }
@@ -383,9 +415,12 @@ function getFundHoldings(code) {
     SELECT stock_code, stock_name, weight, report_date
     FROM fund_holdings
     WHERE fund_code = ?
-    ORDER BY report_date DESC, weight DESC
+      AND report_date = (
+        SELECT MAX(report_date) FROM fund_holdings WHERE fund_code = ?
+      )
+    ORDER BY weight DESC
     LIMIT 10
-  `).all(fundCode);
+  `).all(fundCode, fundCode);
 }
 
 module.exports = {

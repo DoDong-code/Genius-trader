@@ -32,6 +32,10 @@
     console.warn('Saved portfolio data could not be restored.',error);
   }
 
+  if(typeof window.applyAccount2PortfolioCorrection==='function'&&window.applyAccount2PortfolioCorrection(state.accounts)){
+    save();
+  }
+
   state.setActive=function(name){
     originalSetActive(name);
     save();

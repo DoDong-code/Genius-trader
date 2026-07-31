@@ -58,7 +58,37 @@ function initialize(db) {
       price REAL NOT NULL,
       change_percent REAL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE (stock_code, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS fund_estimate (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      fund_code TEXT NOT NULL,
+      trade_date TEXT NOT NULL,
+      estimate_change REAL NOT NULL,
+      holdings_change REAL,
+      sector_change REAL,
+      cash_adjustment REAL NOT NULL DEFAULT 0,
+      confidence TEXT NOT NULL,
+      quote_coverage REAL NOT NULL DEFAULT 0,
+      calculation_json TEXT,
+      calculated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL,
+      UNIQUE (fund_code, trade_date),
+      FOREIGN KEY (fund_code) REFERENCES fund(fund_code) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_fund_estimate_code_date
+      ON fund_estimate (fund_code, trade_date DESC);
+
+    CREATE TABLE IF NOT EXISTS data_sync_state (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      resource_key TEXT NOT NULL,
+      data_type TEXT NOT NULL,
+      last_synced_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      UNIQUE (resource_key, data_type)
     );
 
     CREATE TABLE IF NOT EXISTS portfolio (
@@ -77,6 +107,11 @@ function initialize(db) {
     CREATE INDEX IF NOT EXISTS idx_portfolio_account
       ON portfolio (account_id);
   `);
+
+  const stockColumns = db.prepare('PRAGMA table_info(stock_price)').all();
+  if (!stockColumns.some(column => column.name === 'updated_at')) {
+    db.exec("ALTER TABLE stock_price ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'");
+  }
 }
 
 function getDatabase() {

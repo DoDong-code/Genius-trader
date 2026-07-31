@@ -190,9 +190,17 @@
     if (!section.querySelector('.holding-head')) {
       const head = document.createElement('div');
       head.className = 'holding-head';
-      head.innerHTML = '<span>基金</span><span>持有收益</span><span>今日收益</span><span>持有金额</span>';
+      head.innerHTML = '<span>基金</span><span><button type="button" class="holding-sort-button" data-sort-key="holdingProfit" aria-sort="none">持有收益</button></span><span><button type="button" class="holding-sort-button" data-sort-key="todayProfit" aria-sort="none">今日收益</button></span><span><button type="button" class="holding-sort-button" data-sort-key="amount" aria-sort="none">持有金额</button></span>';
       section.querySelector('.fund-list').before(head);
     }
+
+    const header = section.querySelector('.holding-head');
+    const labels = ['持有收益', '今日收益', '持有金额'];
+    header?.querySelectorAll('span:not(:first-child)').forEach((cell, index) => {
+      if (cell.querySelector('[data-sort-key]')) return;
+      const key = index === 0 ? 'holdingProfit' : index === 1 ? 'todayProfit' : 'amount';
+      cell.innerHTML = `<button type="button" class="holding-sort-button" data-sort-key="${key}" aria-sort="none">${labels[index]}</button>`;
+    });
 
     const account = window.portfolioState.accounts[window.portfolioState.getActive()];
     section.querySelectorAll('.fund-row').forEach(row => {
@@ -210,7 +218,7 @@
       }
 
       [row.children[1], row.children[2]].forEach(cell => {
-        if (!cell) return;
+        if (!cell || cell.dataset.estimateUnavailable === 'true') return;
         const strong = cell.querySelector('strong');
         const span = cell.querySelector('span');
         if (!strong || !span) return;
@@ -238,5 +246,71 @@
   }
 
   new MutationObserver(enhance).observe(root, { childList: true, subtree: true });
+
+  if (!root.dataset.fundSortBound) {
+    root.dataset.fundSortBound = 'true';
+    let sortKey = null;
+    let sortDirection = 'default';
+
+    const sortValue = (fund, key) => {
+      if (key === 'amount') return Number(fund.amount) || 0;
+      if (key === 'holdingProfit') return Number.isFinite(fund.holdingProfit)
+        ? Number(fund.holdingProfit)
+        : (Number(fund.amount) || 0) * (Number(fund.hold) || 0);
+      return Number.isFinite(fund.todayEstimate)
+        ? Number(fund.todayEstimate)
+        : (Number(fund.amount) || 0) * (Number(fund.today) || 0);
+    };
+
+    const refreshSortLabels = () => {
+      root.querySelectorAll('[data-sort-key]').forEach(button => {
+        const active = button.dataset.sortKey === sortKey && sortDirection !== 'default';
+        const arrow = active ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : '';
+        button.textContent = `${button.dataset.sortKey === 'holdingProfit' ? '持有收益' : button.dataset.sortKey === 'todayProfit' ? '今日收益' : '持有金额'}${arrow}`;
+        button.setAttribute('aria-sort', active ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none');
+      });
+    };
+
+    root.addEventListener('click', event => {
+      const button = event.target.closest('[data-sort-key]');
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const section = root.querySelector('.list-section');
+      const list = section?.querySelector('.fund-list');
+      const account = window.portfolioState?.accounts?.[window.portfolioState?.getActive?.()];
+      if (!list || !account) return;
+
+      const nextKey = button.dataset.sortKey;
+      if (sortKey !== nextKey) {
+        sortKey = nextKey;
+        sortDirection = 'asc';
+      } else if (sortDirection === 'asc') {
+        sortDirection = 'desc';
+      } else {
+        sortKey = null;
+        sortDirection = 'default';
+      }
+
+      const orderByCode = new Map((account.funds || []).map((fund, index) => [String(fund.code), index]));
+      const fundsByCode = new Map((account.funds || []).map(fund => [String(fund.code), fund]));
+      const rows = [...list.querySelectorAll('.fund-row')];
+      const orderedRows = rows.slice().sort((left, right) => {
+        if (sortDirection === 'default') {
+          return (orderByCode.get(String(left.dataset.code)) || 0) - (orderByCode.get(String(right.dataset.code)) || 0);
+        }
+        const difference = sortValue(fundsByCode.get(String(left.dataset.code)) || {}, sortKey)
+          - sortValue(fundsByCode.get(String(right.dataset.code)) || {}, sortKey);
+        return sortDirection === 'asc' ? difference : -difference;
+      });
+
+      if (orderedRows.some((row, index) => row !== rows[index])) {
+        orderedRows.forEach(row => list.appendChild(row));
+      }
+
+      refreshSortLabels();
+    }, true);
+  }
   enhance();
 })();

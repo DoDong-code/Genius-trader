@@ -1,5 +1,5 @@
 (function () {
-  const apiBase = 'http://localhost:3002';
+  const apiBase = window.FUND_API_BASE || 'http://localhost:3003';
   const root = document.querySelector('#view-root');
   if (!root || !window.portfolioState) return;
 
@@ -232,8 +232,9 @@
     const holdingProfit = Number.isFinite(fund.holdingProfit)
       ? fund.holdingProfit
       : fund.amount * holdingRate;
-    const todayChange = Number(fund.today) || 0;
-    const todayProfit = fund.amount * todayChange;
+    const storedToday = Number(fund.today);
+    const todayChange = Number.isFinite(storedToday) ? storedToday : null;
+    const todayProfit = Number.isFinite(todayChange) ? fund.amount * todayChange : null;
 
     const backdrop = document.createElement('div');
     backdrop.className = 'drawer-backdrop real-detail-drawer';
@@ -248,8 +249,8 @@
           <div class="detail-values">
             <div><span>当前金额</span><b>${money(fund.amount)}</b></div>
             <div><span>持有收益</span><b class="${tone(holdingRate)}">${percent(holdingRate)}</b></div>
-            <div><span>今日估算</span><b class="${tone(todayProfit)}">${money(todayProfit)}</b></div>
-            <div><span>今日涨幅</span><b class="${tone(todayChange)}">${percent(todayChange)}</b></div>
+            <div><span>今日估算</span><b class="${Number.isFinite(todayProfit) ? tone(todayProfit) : ''}">${Number.isFinite(todayProfit) ? money(todayProfit) : '待估值'}</b></div>
+            <div><span>今日涨幅</span><b class="${Number.isFinite(todayChange) ? tone(todayChange) : ''}">${Number.isFinite(todayChange) ? percent(todayChange) : '—'}</b></div>
           </div>
 
           <div class="detail-section">
@@ -334,9 +335,9 @@
       if (!backdrop.isConnected) return;
       const history = payload.history || [];
       setupHistoryExplorer(backdrop, history);
-      state.textContent = payload.latest_nav?.date
-        ? `更新至 ${payload.latest_nav.date}`
-        : `${history.length} 条数据`;
+      state.textContent = payload.data_status?.history === 'normal'
+        ? '✓ 数据正常'
+        : '⚠ 等待数据源';
 
       if (payload.fund?.fund_name) {
         backdrop.querySelector('#real-detail-title').textContent = payload.fund.fund_name;
@@ -349,26 +350,29 @@
         holdings: payload.holdings
       });
 
-      if (payload.estimate?.estimate_change != null || history.length >= 2) {
-        const previous = Number(history[history.length - 2].nav);
-        const latest = Number(history[history.length - 1].nav);
-        const todayChange = payload.estimate?.estimate_change != null
-          ? Number(payload.estimate.estimate_change)
-          : previous ? (latest - previous) / previous : 0;
+      if (payload.estimate?.estimate_change != null) {
+        const apiEstimate = Number(payload.estimate?.estimate_change);
+        const todayChange = Number.isFinite(apiEstimate) ? apiEstimate : Number(fund.today);
         const metricCells = backdrop.querySelectorAll('.detail-values > div');
         const estimate = fund.amount * todayChange;
         metricCells[2].querySelector('b').className = tone(estimate);
         metricCells[2].querySelector('b').textContent = money(estimate);
         metricCells[3].querySelector('b').className = tone(todayChange);
         metricCells[3].querySelector('b').textContent = percent(todayChange);
+      } else {
+        const metricCells = backdrop.querySelectorAll('.detail-values > div');
+        metricCells[2].querySelector('b').className = '';
+        metricCells[2].querySelector('b').textContent = '待估值';
+        metricCells[3].querySelector('b').className = '';
+        metricCells[3].querySelector('b').textContent = '—';
       }
     } catch {
       if (!backdrop.isConnected) return;
       historyContent.innerHTML = `
         <div class="detail-empty detail-error">
-          真实数据服务暂时不可用，请确认数据服务已启动。
+          暂未同步到历史净值。东方财富数据源当前不可访问，恢复后再次打开即可自动补齐。
         </div>`;
-      state.textContent = '读取失败';
+      state.textContent = '等待数据源';
     }
   }
 

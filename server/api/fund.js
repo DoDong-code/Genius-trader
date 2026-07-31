@@ -7,6 +7,10 @@ const {
 } = require('../services/fundService');
 const { getHistory } = require('../services/navService');
 const { estimatePortfolio } = require('../services/estimateService');
+const {
+  calculateFundEstimate,
+  calculateAccountEstimate
+} = require('../services/estimateEngine');
 const { fetchStockQuote } = require('../services/marketService');
 
 function sendJson(response, statusCode, payload) {
@@ -65,6 +69,18 @@ async function handleFundApi(request, response, url) {
     return true;
   }
 
+  match = routeMatch(url.pathname, /^\/api\/fund\/(\d{6})\/estimate$/);
+  if (match) {
+    const amount = url.searchParams.has('amount')
+      ? Number(url.searchParams.get('amount')) : undefined;
+    const estimate = await calculateFundEstimate(match[0], {
+      amount,
+      force: url.searchParams.get('force') === '1'
+    });
+    sendJson(response, 200, { success: true, ...estimate });
+    return true;
+  }
+
   match = routeMatch(url.pathname, /^\/api\/fund\/(\d{6})$/);
   if (match) {
     let fund = getFund(match[0]);
@@ -84,6 +100,10 @@ async function handleFundApi(request, response, url) {
       fund,
       latest_nav: fund.latest_nav,
       history,
+      data_status: {
+        history: history.length ? 'normal' : 'pending',
+        label: history.length ? '数据正常' : '等待数据源'
+      },
       holdings: getFundHoldings(match[0]),
       estimate: url.searchParams.get('refresh') === '1'
         ? await getRealtimeFundEstimate(match[0])
@@ -109,6 +129,15 @@ async function handleFundApi(request, response, url) {
       success: true,
       ...estimatePortfolio(match[0])
     });
+    return true;
+  }
+
+  match = routeMatch(url.pathname, /^\/api\/account\/([^/]+)\/estimate$/);
+  if (match) {
+    const estimate = await calculateAccountEstimate(match[0], {
+      force: url.searchParams.get('force') === '1'
+    });
+    sendJson(response, 200, { success: true, ...estimate });
     return true;
   }
 
