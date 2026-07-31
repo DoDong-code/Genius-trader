@@ -59,6 +59,60 @@
     return account?.funds.find(fund => String(fund.code) === String(code));
   }
 
+  // Keep the drawer on exactly the same source-of-truth as the holdings list:
+  // today's published NAV wins; only then may an intraday estimate be shown.
+  function shanghaiDate() {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date());
+  }
+
+  function officialNavChange(history, navDate) {
+    const records = (Array.isArray(history) ? history : [])
+      .filter(item => item?.date && Number.isFinite(Number(item.nav)))
+      .slice()
+      .sort((left, right) => String(left.date).localeCompare(String(right.date)));
+    const index = records.findIndex(item => item.date === navDate);
+    if (index <= 0) return null;
+    const current = Number(records[index].nav);
+    const previous = Number(records[index - 1].nav);
+    return Number.isFinite(current) && Number.isFinite(previous) && previous !== 0
+      ? current / previous - 1
+      : null;
+  }
+
+  function resolveTodayData(fund, payload = {}) {
+    const history = payload.history || [];
+    const navDate = payload.latest_nav?.date || payload.fund?.latest_nav?.date || null;
+    const official = navDate === shanghaiDate();
+    const officialChange = official ? officialNavChange(history, navDate) : null;
+    if (Number.isFinite(officialChange)) {
+      return { official: true, navDate, change: officialChange, profit: fund.amount * officialChange };
+    }
+
+    // Portfolio-provided intraday estimates are the first fallback while the
+    // official NAV is pending. Do not let a stale/empty API zero overwrite
+    // these values in the detail drawer.
+    const manualIsCurrent = fund.manualEstimateDate === shanghaiDate();
+    const manualChange = Number(fund.manualToday);
+    if (manualIsCurrent && fund.manualEstimateUnavailable !== true && Number.isFinite(manualChange)) {
+      return { official: false, navDate: null, change: manualChange, profit: fund.amount * manualChange };
+    }
+
+    const apiChange = Number(payload.estimate?.estimate_change);
+    if (Number.isFinite(apiChange)) {
+      return { official: false, navDate: null, change: apiChange, profit: fund.amount * apiChange };
+    }
+
+    // The list may already have refreshed a same-day manual/official value.
+    const localIsCurrent = manualIsCurrent || fund.navUpdatedAt === shanghaiDate();
+    const localChange = Number(fund.today);
+    if (localIsCurrent && Number.isFinite(localChange)) {
+      return { official: fund.navUpdatedAt === shanghaiDate(), navDate: fund.navUpdatedAt || null, change: localChange, profit: fund.amount * localChange };
+    }
+    return { official: false, navDate: null, change: null, profit: null };
+  }
+
   function historyForRange(history, rangeKey) {
     if (!Array.isArray(history) || !history.length) return [];
     const range = historyRanges.find(item => item.key === rangeKey) || historyRanges[3];
@@ -222,9 +276,193 @@
   function transactionsMarkup(fund) {
     const transactions = Array.isArray(fund.transactions) ? fund.transactions : [];
     if (!transactions.length) return '<div class="detail-empty">暂无交易记录</div>';
-    return `<div class="transaction-list">${transactions.map(item => `
-      <div><span>${escapeHtml(item[0])}</span><b>${escapeHtml(item[1])}</b><em>${escapeHtml(item[2])}</em></div>
-    `).join('')}</div>`;
+    return `<div class="transaction-list">${transactions.map(item => {
+      const legacy = Array.isArray(item);
+      const isSell = legacy ? String(item[1] || '').includes('减') : item?.type === 'sell';
+      const date = legacy ? item[0] : item?.date;
+      const label = legacy ? item[1] : (isSell ? '卖出' : '买入');
+      const amount = legacy
+        ? item[2]
+        : `${isSell ? '−' : '+'}${money(Math.abs(Number(item?.amount) || 0))}`;
+      return `
+      <div><span>${escapeHtml(date || '')}</span><b>${escapeHtml(label || '')}</b><em>${escapeHtml(amount || '')}</em></div>
+    `;
+    }).join('')}</div>`;
+  }
+
+  function normalizeHolding(fund, amount, profit) {
+    const nextAmount = Math.max(0, Number(amount) || 0);
+    const nextProfit = Number(profit) || 0;
+    const cost = nextAmount - nextProfit;
+    const nextRate = cost > 0 ? nextProfit / cost : 0;
+
+    fund.amount = nextAmount;
+    fund.holdingProfit = nextProfit;
+    fund.holdingRate = nextRate;
+    fund.hold = nextRate;
+  }
+
+  function refreshDrawerHoldingMetrics(backdrop, fund) {
+    const cells = backdrop.querySelectorAll('.detail-values > div');
+    const amount = Number(fund.amount) || 0;
+    const profit = Number(fund.holdingProfit ?? fund.profit) || 0;
+    const rate = Number(fund.holdingRate ?? fund.hold) || 0;
+    const update = (index, value, className) => {
+      const valueNode = cells[index]?.querySelector('b');
+      if (!valueNode) return;
+      valueNode.className = className || '';
+      valueNode.textContent = value;
+    };
+
+    update(0, money(amount), '');
+    update(2, money(profit), tone(profit));
+    update(3, percent(rate), tone(rate));
+  }
+
+  function localDateTimeInputValue() {
+    const date = new Date();
+    const offset = date.getTimezoneOffset();
+    return new Date(date.getTime() - offset * 60000).toISOString().slice(0, 16);
+  }
+
+  function transactionDateLabel(value) {
+    const date = value ? new Date(value) : new Date();
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(date).replace(/\//g, '-');
+  }
+
+  function openHoldingEditor(fund, drawerBackdrop) {
+    const amount = Number(fund.amount) || 0;
+    const profit = Number(fund.holdingProfit ?? fund.profit) || 0;
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay holding-editor-overlay';
+    overlay.innerHTML = [
+      '<form class="confirm-dialog fund-modal holding-editor" novalidate>',
+      '<h2>修改持仓</h2>',
+      '<p>直接修正当前数据，或按交易金额同步加仓、减仓。</p>',
+      '<div class="holding-summary">',
+      '<div><span>当前持有金额</span><b>' + money(amount) + '</b></div>',
+      '<div><span>当前持有收益</span><b class="' + tone(profit) + '">' + money(profit) + '</b></div>',
+      '</div>',
+      '<div class="holding-edit-grid">',
+      '<label>持有金额<input name="holding-amount" type="number" min="0" step="0.01" value="' + amount.toFixed(2) + '"></label>',
+      '<label>持有收益<input name="holding-profit" type="number" step="0.01" value="' + profit.toFixed(2) + '"></label>',
+      '</div>',
+      '<div class="holding-action-switch" role="group" aria-label="持仓操作">',
+      '<button type="button" class="active" data-holding-mode="edit">直接修改</button>',
+      '<button type="button" data-holding-mode="add">同步加仓</button>',
+      '<button type="button" data-holding-mode="reduce">同步减仓</button>',
+      '</div>',
+      '<div class="holding-trade-fields" hidden>',
+      '<div class="holding-edit-grid">',
+      '<label><span data-trade-amount-label>买入金额</span><input name="trade-amount" type="number" min="0.01" step="0.01" value=""></label>',
+      '<label><span data-trade-fee-label>买入费率</span><input name="trade-fee" type="number" min="0" step="0.0001" value="0"></label>',
+      '<label><span data-trade-time-label>买入时间</span><input name="trade-time" type="datetime-local" value="' + localDateTimeInputValue() + '"></label>',
+      '</div>',
+      '</div>',
+      '<p class="holding-editor-error" role="alert"></p>',
+      '<div class="confirm-actions">',
+      '<button type="button" class="secondary" data-holding-cancel>取消</button>',
+      '<button type="submit" class="primary">保存</button>',
+      '</div>',
+      '</form>'
+    ].join('');
+
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('visible'));
+
+    const form = overlay.querySelector('form');
+    const tradeFields = form.querySelector('.holding-trade-fields');
+    const error = form.querySelector('.holding-editor-error');
+    let mode = 'edit';
+
+    const close = () => {
+      overlay.classList.remove('visible');
+      document.removeEventListener('keydown', onKeydown);
+      window.setTimeout(() => overlay.remove(), 180);
+    };
+    const onKeydown = event => {
+      if (event.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', onKeydown);
+
+    const setMode = nextMode => {
+      mode = nextMode;
+      error.textContent = '';
+      tradeFields.hidden = mode === 'edit';
+      form.querySelectorAll('[data-holding-mode]').forEach(button => {
+        button.classList.toggle('active', button.dataset.holdingMode === mode);
+      });
+      const isReduce = mode === 'reduce';
+      form.querySelector('[data-trade-amount-label]').textContent = isReduce ? '卖出金额' : '买入金额';
+      form.querySelector('[data-trade-fee-label]').textContent = isReduce ? '卖出费率' : '买入费率';
+      form.querySelector('[data-trade-time-label]').textContent = isReduce ? '卖出时间' : '买入时间';
+    };
+
+    form.querySelectorAll('[data-holding-mode]').forEach(button => {
+      button.addEventListener('click', () => setMode(button.dataset.holdingMode));
+    });
+
+    overlay.addEventListener('click', event => {
+      if (event.target === overlay || event.target.closest('[data-holding-cancel]')) close();
+    });
+
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      const amountInput = form.querySelector('[name="holding-amount"]');
+      const profitInput = form.querySelector('[name="holding-profit"]');
+      const tradeAmountInput = form.querySelector('[name="trade-amount"]');
+      const feeInput = form.querySelector('[name="trade-fee"]');
+      const timeInput = form.querySelector('[name="trade-time"]');
+      let nextAmount = Number(amountInput.value);
+      let nextProfit = Number(profitInput.value);
+
+      if (!Number.isFinite(nextAmount) || nextAmount < 0 || !Number.isFinite(nextProfit)) {
+        error.textContent = '请填写有效的持有金额和持有收益。';
+        return;
+      }
+
+      if (mode !== 'edit') {
+        const tradeAmount = Number(tradeAmountInput.value);
+        const feeRate = Number(feeInput.value);
+        if (!Number.isFinite(tradeAmount) || tradeAmount <= 0 || !Number.isFinite(feeRate) || feeRate < 0) {
+          error.textContent = '请填写有效的交易金额和费率。';
+          return;
+        }
+        const fee = tradeAmount * feeRate / 100;
+        if (mode === 'add') {
+          nextAmount += tradeAmount;
+          nextProfit -= fee;
+        } else {
+          if (tradeAmount + fee > nextAmount) {
+            error.textContent = '卖出金额及费率不能超过当前持有金额。';
+            return;
+          }
+          const remainingRatio = nextAmount === 0 ? 0 : (nextAmount - tradeAmount) / nextAmount;
+          nextAmount -= tradeAmount;
+          nextProfit = nextProfit * remainingRatio - fee;
+        }
+        fund.transactions = Array.isArray(fund.transactions) ? fund.transactions : [];
+        fund.transactionVersion = 2;
+        fund.transactions.unshift({
+          type: mode === 'add' ? 'buy' : 'sell',
+          amount: tradeAmount,
+          fee,
+          date: transactionDateLabel(timeInput.value)
+        });
+      }
+
+      normalizeHolding(fund, nextAmount, nextProfit);
+      window.savePortfolioState?.();
+      refreshDrawerHoldingMetrics(drawerBackdrop, fund);
+      const transactionContent = drawerBackdrop.querySelector('.detail-transaction-content');
+      if (transactionContent) transactionContent.innerHTML = transactionsMarkup(fund);
+      close();
+    });
   }
 
   function renderDrawer(fund) {
@@ -232,14 +470,14 @@
     const holdingProfit = Number.isFinite(fund.holdingProfit)
       ? fund.holdingProfit
       : fund.amount * holdingRate;
-    const storedToday = Number(fund.today);
-    const todayChange = Number.isFinite(storedToday) ? storedToday : null;
-    const todayProfit = Number.isFinite(todayChange) ? fund.amount * todayChange : null;
+    const initialToday = resolveTodayData(fund);
+    const todayProfit = initialToday.profit;
 
     const backdrop = document.createElement('div');
     backdrop.className = 'drawer-backdrop real-detail-drawer';
     backdrop.innerHTML = `
       <aside class="detail-drawer" role="dialog" aria-modal="true" aria-labelledby="real-detail-title">
+        <button type="button" class="detail-edit-holding" data-edit-holding>修改持仓</button>
         <button class="drawer-close" aria-label="关闭详情">×</button>
         <div class="drawer-scroll">
           <p class="eyebrow detail-api-type">${escapeHtml(fund.category || '基金')} · 基金详情</p>
@@ -248,9 +486,9 @@
 
           <div class="detail-values">
             <div><span>当前金额</span><b>${money(fund.amount)}</b></div>
-            <div><span>持有收益</span><b class="${tone(holdingRate)}">${percent(holdingRate)}</b></div>
-            <div><span>今日估算</span><b class="${Number.isFinite(todayProfit) ? tone(todayProfit) : ''}">${Number.isFinite(todayProfit) ? money(todayProfit) : '待估值'}</b></div>
-            <div><span>今日涨幅</span><b class="${Number.isFinite(todayChange) ? tone(todayChange) : ''}">${Number.isFinite(todayChange) ? percent(todayChange) : '—'}</b></div>
+            <div><span>今日收益</span><b class="${Number.isFinite(todayProfit) ? tone(todayProfit) : ''}">${Number.isFinite(todayProfit) ? money(todayProfit) : '待估值'}</b></div>
+            <div><span>持有收益</span><b class="${tone(holdingProfit)}">${money(holdingProfit)}</b></div>
+            <div><span>持有收益率</span><b class="${tone(holdingRate)}">${percent(holdingRate)}</b></div>
           </div>
 
           <div class="detail-section">
@@ -289,7 +527,7 @@
           <div class="detail-section">
             <p class="eyebrow">交易记录</p>
             <h3>最近操作</h3>
-            ${transactionsMarkup(fund)}
+            <div class="detail-transaction-content">${transactionsMarkup(fund)}</div>
           </div>
         </div>
       </aside>`;
@@ -305,6 +543,9 @@
     };
     backdrop.addEventListener('click', event => {
       if (event.target === backdrop || event.target.closest('.drawer-close')) close();
+    });
+    backdrop.querySelector('[data-edit-holding]')?.addEventListener('click', () => {
+      openHoldingEditor(fund, backdrop);
     });
     document.addEventListener('keydown', function onEscape(event) {
       if (event.key === 'Escape') {
@@ -350,21 +591,18 @@
         holdings: payload.holdings
       });
 
-      if (payload.estimate?.estimate_change != null) {
-        const apiEstimate = Number(payload.estimate?.estimate_change);
-        const todayChange = Number.isFinite(apiEstimate) ? apiEstimate : Number(fund.today);
-        const metricCells = backdrop.querySelectorAll('.detail-values > div');
-        const estimate = fund.amount * todayChange;
-        metricCells[2].querySelector('b').className = tone(estimate);
-        metricCells[2].querySelector('b').textContent = money(estimate);
-        metricCells[3].querySelector('b').className = tone(todayChange);
-        metricCells[3].querySelector('b').textContent = percent(todayChange);
+      const today = resolveTodayData(fund, payload);
+      const metricCells = backdrop.querySelectorAll('.detail-values > div');
+      const todayProfitCell = metricCells[1];
+      if (Number.isFinite(today.change) && Number.isFinite(today.profit)) {
+        fund.today = today.change;
+        fund.todayEstimate = today.profit;
+        if (today.official) fund.navUpdatedAt = today.navDate;
+        todayProfitCell.querySelector('b').className = tone(today.profit);
+        todayProfitCell.querySelector('b').textContent = money(today.profit);
       } else {
-        const metricCells = backdrop.querySelectorAll('.detail-values > div');
-        metricCells[2].querySelector('b').className = '';
-        metricCells[2].querySelector('b').textContent = '待估值';
-        metricCells[3].querySelector('b').className = '';
-        metricCells[3].querySelector('b').textContent = '—';
+        todayProfitCell.querySelector('b').className = '';
+        todayProfitCell.querySelector('b').textContent = '待估值';
       }
     } catch {
       if (!backdrop.isConnected) return;

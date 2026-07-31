@@ -245,7 +245,9 @@
     }
   }
 
-  new MutationObserver(enhance).observe(root, { childList: true, subtree: true });
+  // Keep the observer at the view boundary so row/cell updates do not make
+  // this legacy enhancer run recursively.
+  new MutationObserver(enhance).observe(root, { childList: true });
 
   if (!root.dataset.fundSortBound) {
     root.dataset.fundSortBound = 'true';

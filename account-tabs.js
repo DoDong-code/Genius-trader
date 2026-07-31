@@ -135,6 +135,8 @@
   }, true);
 
   window.addEventListener('fund-estimate-updated', updateCard);
-  new MutationObserver(ensure).observe(root, { childList: true, subtree: true });
+  // A view change replaces the root content. Observing direct children is
+  // enough and avoids reacting to the KPI text this module writes itself.
+  new MutationObserver(ensure).observe(root, { childList: true });
   ensure();
 }());

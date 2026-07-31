@@ -55,5 +55,7 @@
   root.addEventListener('click',e=>{const row=e.target.closest('.account-edit-row');if(!row)return;e.preventDefault();e.stopImmediatePropagation()},true);
   root.addEventListener('click',e=>{const del=e.target.closest('[data-action="delete"]');if(!del||del.disabled)return;e.preventDefault();e.stopImmediatePropagation();const names=[...root.querySelectorAll('[data-check]:checked')].map(x=>x.dataset.check);showDeleteConfirm(names)},true);
   root.addEventListener('click',e=>{const add=e.target.closest('[data-action="add-account"]');if(!add)return;e.preventDefault();e.stopImmediatePropagation();showNameModal('新增账户','',name=>{if(window.portfolioState.accounts[name])return;window.portfolioState.accounts[name]={name,funds:[]};window.savePortfolioState?.();root.querySelector('.account-segmented')?.remove();document.querySelector('.nav-tab[data-view="overview"]')?.click()})},true);
-  new MutationObserver(arrange).observe(root,{childList:true,subtree:true});arrange();
+  // Account controls only need arranging after a top-level view change.
+  // Watching all descendants also observes the controls moved by arrange().
+  new MutationObserver(arrange).observe(root,{childList:true});arrange();
 })();

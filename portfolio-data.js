@@ -22,6 +22,7 @@
       manualEstimateUnavailable: today === null,
       notes: notes || [],
       holdings: [],
+      transactionVersion: 2,
       transactions: []
     };
   }

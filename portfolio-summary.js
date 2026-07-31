@@ -76,7 +76,9 @@
     });
   }
 
-  new MutationObserver(schedule).observe(root, { childList: true, subtree: true });
+  // The summary updates its own values. Only react when the mounted view at
+  // the root changes, not to those internal text updates.
+  new MutationObserver(schedule).observe(root, { childList: true });
   window.addEventListener('fund-estimate-updated', schedule);
   schedule();
 })();

@@ -5,6 +5,25 @@
   var active = 0;
   var MAX_CONCURRENT = 3;
   var queue = [];
+  var FUND_SECTORS = {
+    '014002': '\u5168\u7403\u667a\u80fd\u79d1\u6280',
+    '022184': '\u5168\u7403\u79d1\u6280',
+    '002771': '\u7075\u6d3b\u914d\u7f6e',
+    '002207': '\u9ec4\u91d1\u77ff\u4e1a',
+    '019633': '\u534a\u5bfc\u4f53\u8bbe\u5907',
+    '007339': '\u6caa\u6df1300',
+    '004253': '\u9ec4\u91d1',
+    '013309': '\u6052\u751f\u79d1\u6280',
+    '010827': '\u4ea7\u4e1a\u8d8b\u52bf',
+    '025422': '\u6570\u5b57\u7ecf\u6d4e',
+    '014847': '\u503a\u5238',
+    '008173': '\u503a\u5238',
+    '020741': '\u503a\u5238',
+    '015736': '\u7eaf\u503a',
+    '380006': '\u7eaf\u503a',
+    '004103': '\u503a\u5238',
+    '009690': '\u7075\u6d3b\u914d\u7f6e'
+  };
 
   function formatMoney(value) {
     var amount = Number(value) || 0;
@@ -33,6 +52,21 @@
       : null;
   }
 
+  function setFundMeta(row, fund) {
+    var meta = row && row.querySelector('.fund-info small');
+    if (!meta || !fund) return;
+    var sector = FUND_SECTORS[fund.code] || fund.sector || fund.category || '\u57fa\u91d1';
+    var text = fund.code + ' \u00b7 ' + sector;
+    // This function is called by a DOM observer.  Do not rewrite an already
+    // correct value, otherwise replaceChildren triggers the observer again.
+    if (meta.dataset.fundMeta === text) return;
+    var badge = meta.querySelector('.nav-updated-badge');
+    meta.dataset.fundMeta = text;
+    meta.replaceChildren();
+    if (badge) meta.appendChild(badge);
+    meta.appendChild(document.createTextNode(text));
+  }
+
   function updateTodayCell(row, change, profit) {
     var cell = row.querySelector('.fund-today') || row.children[2];
     if (!cell) return;
@@ -51,9 +85,11 @@
     cell.classList.add('market-flat');
   }
 
-  function markNavUpdated(row, date) {
+  function markNavUpdated(row, date, fund) {
     var meta = row.querySelector('.fund-info small');
-    if (!meta || meta.querySelector('.nav-updated-badge')) return;
+    if (!meta) return;
+    setFundMeta(row, fund || currentFund(row.dataset.code));
+    if (meta.querySelector('.nav-updated-badge')) return;
     var badge = document.createElement('span');
     badge.className = 'nav-updated-badge';
     badge.textContent = '已更新';
@@ -133,6 +169,7 @@
     var code = row.dataset.code;
     var fund = currentFund(code);
     if (!code || !fund) return;
+    setFundMeta(row, fund);
     row.dataset.estimateState = 'loading';
 
     enqueue(function () {
@@ -141,10 +178,14 @@
         var snapshot = results[0].status === 'fulfilled' ? results[0].value || {} : {};
         var navDate = snapshot.latest_nav && snapshot.latest_nav.date;
         if (!navDate && snapshot.fund && snapshot.fund.latest_nav) navDate = snapshot.fund.latest_nav.date;
-        var officialUpdated = navDate === shanghaiDate();
+        // A same-day NAV date alone is not enough to call the fund "updated".
+        // It must also have a prior NAV record so today's official change can be
+        // calculated. Otherwise the list and the detail drawer can disagree.
+        var officialChange = navDate === shanghaiDate() ? officialNavChange(snapshot, navDate) : NaN;
+        var officialUpdated = Number.isFinite(officialChange);
         if (officialUpdated) {
           fund.navUpdatedAt = navDate;
-          markNavUpdated(row, navDate);
+          markNavUpdated(row, navDate, fund);
         } else {
           delete fund.navUpdatedAt;
           clearNavUpdated(row);
@@ -155,7 +196,7 @@
         var manualDate = fund.manualEstimateDate;
         var hasManualEstimate = manualDate === shanghaiDate() && Number.isFinite(Number(fund.manualToday));
         var manualUnavailable = manualDate === shanghaiDate() && fund.manualEstimateUnavailable === true;
-        var change = officialUpdated ? officialNavChange(snapshot, navDate) : (hasManualEstimate ? Number(fund.manualToday) : Number(estimate.estimate_change));
+        var change = officialUpdated ? officialChange : (hasManualEstimate ? Number(fund.manualToday) : Number(estimate.estimate_change));
         // When the official NAV has not yet arrived, use the public intraday
         // estimate returned with the refreshed fund snapshot as a safe fallback.
         if (!officialUpdated && !Number.isFinite(change)) {
@@ -200,7 +241,26 @@
     document.querySelectorAll('#view-root .fund-row[data-code]').forEach(hydrateRow);
   }
 
-  var observer = new MutationObserver(function () { window.requestAnimationFrame(scan); });
-  observer.observe(document.getElementById('view-root') || document.body, { childList: true, subtree: true });
+  window.refreshFundEstimates = function () {
+    document.querySelectorAll('#view-root .fund-row[data-code]').forEach(function (row) {
+      delete row.dataset.estimateState;
+    });
+    scan();
+  };
+
+  var scanQueued = false;
+  function scheduleScan() {
+    if (scanQueued) return;
+    scanQueued = true;
+    window.requestAnimationFrame(function () {
+      scanQueued = false;
+      scan();
+    });
+  }
+
+  var observer = new MutationObserver(scheduleScan);
+  // Rows are recreated when the active view is mounted. Watching only that
+  // boundary prevents normal estimate-cell writes from scheduling re-scans.
+  observer.observe(document.getElementById('view-root') || document.body, { childList: true });
   scan();
 }());
