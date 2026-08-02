@@ -3,13 +3,8 @@ const { upsertPosition } = require('../services/estimateService');
 const { closeDatabase } = require('../database/db');
 
 const seedFunds = [
-  { code: '019633', amount: 11680 },
-  { code: '025500', amount: 0 },
-  { code: '022184', amount: 8648 },
-  { code: '008702', amount: 0 },
-  { code: '000961', amount: 9200 },
-  { code: '004253', amount: 12800 },
-  { code: '012349', amount: 9126 }
+  { code: '019633', amount: 10000 },
+  { code: '008702', amount: 15000 }
 ];
 
 async function main() {

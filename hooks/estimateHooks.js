@@ -1,4 +1,4 @@
-const DEFAULT_API_BASE = 'http://localhost:3002';
+const DEFAULT_API_BASE = '';
 
 async function requestEstimate(path, options = {}) {
   const apiBase = options.apiBase || DEFAULT_API_BASE;

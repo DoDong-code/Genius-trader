@@ -1,7 +1,7 @@
 (function(){
   const state=window.portfolioState;
   if(!state)return;
-  const storageKey='genius-trader-portfolio-v1';
+  const storageKey='genius-trader-portfolio-v2';
   const originalSetActive=state.setActive.bind(state);
 
   function save(){
